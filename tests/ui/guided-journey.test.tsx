@@ -1,0 +1,41 @@
+﻿import {describe,it,expect} from 'vitest';
+import {renderToStaticMarkup} from 'react-dom/server';
+import GuidedExample from '../../src/ui/GuidedExample';
+import {openExample,proposal,activeRule,checkpoint,restoreCheckpoint} from '../../src/ui/guided/journey';
+import {api,unwrap} from '../../src/ui/adapter';
+import {teach,decideTeaching,inspectRule,decideApplication,compensateRule} from '../../src/ui/ruleIntent';
+import {decideReuse} from '../../src/ui/ruleReuse';
+describe('guided genuine two-generation journey',()=>{
+ it('retains inactive teaching, requires new approval, exports held-safe values, restores and undoes',()=>{
+  let s=openExample();const original=JSON.stringify(s.snapshots);
+  const first=teach('label',[{input:'SKU:tea',output:'tea'}]);expect(first.alternatives.length).toBeGreaterThan(1);
+  const t=teach('label',[{input:'SKU:tea',output:'tea'},{input:'SKU:SKU:tea',output:'SKU:tea'}]);
+  const candidate=t.alternatives.find(a=>a.operation.kind==='removePrefix')!;
+  s=decideTeaching(s,s.binding,t,candidate.candidateId,{kind:'startsWith',value:'SKU:'},'approve','User chose one prefix, including unseen values');
+  expect(unwrap(api.preview(s)).changedCells).toHaveLength(0);
+  const prior=inspectRule(s,activeRule(s));s=decideApplication(s,prior,'approve','User approved eligible previous-file values');
+  const c=s.assessments.find(a=>a.key==='c')!;s=unwrap(api.resolve(s,{binding:s.binding,assessmentId:c.id,action:'keep_latest',reason:'Keep changed source'}));
+  expect(JSON.stringify(s.snapshots)).toBe(original);const archive=api.exportHistory(s);const retained=proposal(archive);
+  expect(retained.status).toBe('INACTIVE');let later=openExample(true);
+  expect(unwrap(api.preview(later)).changedCells).toHaveLength(0);
+  expect(()=>decideApplication(later,prior,'approve','Stale receipt')).toThrow();
+  later=decideReuse(later,retained,'approve','User freshly approves scope for later file');
+  expect(unwrap(api.preview(later)).changedCells).toHaveLength(0);
+  const fresh=inspectRule(later,activeRule(later));expect(fresh.cells.find(c=>c.key==='b')).toMatchObject({before:'SKU:novel',after:'novel',decision:'ELIGIBLE'});
+  expect(fresh.cells.filter(c=>c.decision==='HOLD').map(c=>c.key)).toEqual(['u','c']);
+  later=decideApplication(later,fresh,'approve','User reviewed fresh preview');
+  expect(api.exportReviewed(later,later.binding).ok).toBe(false);
+  later=unwrap(api.resolve(later,{binding:later.binding,assessmentId:later.assessments.find(c=>c.key==='c')!.id,action:'keep_latest',reason:'Keep later source'}));
+  const final=unwrap(api.exportReviewed(later,later.binding));const csv=new TextDecoder().decode(final.csvUtf8);
+  expect(csv).toContain('I-b,novel,b');expect(csv).toContain('REUSED,SKU:unsafe,u');expect(csv).toContain('I-c,SKU:new,c');
+  const restored=restoreCheckpoint(checkpoint(later,archive));expect(api.exportHistory(restored.review)).toBe(api.exportHistory(later));expect(restored.archive).toBe(archive);
+  const event=later.intelligence!.events.find(e=>e.kind==='apply_rule')!;
+  later=compensateRule(restored.review,event.eventId,'Undo explicit application');expect(unwrap(api.preview(later)).changedCells).toHaveLength(0);
+  expect(()=>decideApplication(later,fresh,'approve','Stale after undo')).toThrow();
+ });
+ it('starts without a selected rule, decision or navigation; rejects malformed recovery',()=>{
+  const html=renderToStaticMarkup(<GuidedExample onExit={()=>{throw Error('No render navigation');}}/>);
+  expect(html).toContain('Open fictional previous file');expect(html).toContain('disabled');expect(html).toContain('Step 1 of 7');expect(html).not.toContain('Download reviewed CSV');
+  expect(()=>restoreCheckpoint('{}')).toThrow();
+ });
+});
